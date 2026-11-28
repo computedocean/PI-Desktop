@@ -16,11 +16,13 @@ const { IPC } = await import("@pi-desktop/shared");
  * The bridge exposes an `agentHost` whose `startTurn` runs the same runtime
  * port the Electron composition wires. These tests reach through it to verify
  * the per-turn permission-ceiling policy: a widening request refuses, a
- * narrower request passes through with the mode forwarded as a per-turn
- * override, and a matching request stays silent.
+ * principal bound by the remote ceiling always carries it to the prompt
+ * handler (which records it on the durable Host turn), and an exempt
+ * principal never does.
  */
-function fixture({ sessionPermissionMode }) {
+function fixture({ sessionPermissionMode, queueEntries = [] }) {
   const prompts = [];
+  const pushed = [];
   const host = {
     async call(method, params) {
       if (method === "session.get") {
@@ -35,8 +37,11 @@ function fixture({ sessionPermissionMode }) {
           },
         };
       }
-      if (method === "session.queueList") return { entries: [] };
-      if (method === "session.queuePush") return {};
+      if (method === "session.queueList") return { entries: queueEntries };
+      if (method === "session.queuePush") {
+        pushed.push(params);
+        return {};
+      }
       if (method === "session.queueRemove") return { removed: true };
       if (method === "session.queuePrioritize") return {};
       if (method === "session.queueReorder") return { moved: true };
@@ -44,10 +49,11 @@ function fixture({ sessionPermissionMode }) {
     },
   };
 
+  let busy = false;
   const bridge = createAgentHostBridge({
     channels: IPC.invoke,
     getHost: () => host,
-    isSessionBusy: () => false,
+    isSessionBusy: () => busy,
     log: () => undefined,
     async invoke(channel, [request]) {
       prompts.push({ channel, request });
@@ -55,7 +61,7 @@ function fixture({ sessionPermissionMode }) {
       return { accepted: true, turnId };
     },
   });
-  return { bridge, prompts };
+  return { bridge, prompts, pushed, setBusy: (value) => { busy = value; } };
 }
 
 async function callStart(bridge, principal, effective) {
@@ -141,4 +147,31 @@ test("a widening per-turn ceiling refuses the turn — no sidecar call reaches t
     /"the local runtime cannot widen the per-turn permission ceiling"/,
     "bridge must throw a FORBIDDEN with the widening-specific message",
   );
+});
+
+const lanPhone = { subject: "lan:phone", roles: ["viewer", "controller"], pairedDevice: false };
+
+test("a phone turn carries its ceiling even when the session summary already reads ask", async () => {
+  // `inherit` (global default `auto`) is summarised as `ask`, so the effective
+  // mode matches the summary. The ceiling must still reach the Host, which
+  // resolves the real session mode itself.
+  const { bridge, prompts } = fixture({ sessionPermissionMode: "inherit" });
+  const outcome = await callStart(bridge, lanPhone);
+  assert.ok(outcome?.turn, "the phone turn starts");
+  const promptCall = prompts.find((entry) => entry.channel === IPC.invoke.agentPrompt);
+  assert.equal(promptCall.request.permissionMode, "ask");
+});
+
+test("a queued phone turn keeps its ceiling in the durable queue record", async () => {
+  const { bridge, pushed, prompts, setBusy } = fixture({ sessionPermissionMode: "auto" });
+  setBusy(true);
+  const queued = await bridge.agentHost.startTurn(lanPhone, {
+    sessionId: "s1",
+    admission: "queue",
+    input: { text: "later" },
+    context: { requestId: "req-queued" },
+  });
+  assert.equal(queued.turn.status, "queued");
+  assert.equal(pushed.at(-1)?.permissionCeiling, "ask");
+  assert.equal(prompts.length, 0, "nothing runs while the session is busy");
 });

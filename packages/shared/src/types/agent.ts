@@ -49,14 +49,11 @@ export type AgentPromptRequest = {
    */
   viewingSessionId?: string | null;
   /**
-   * Per-turn permission ceiling override (spec §7.3): the effective mode the
-   * remote layer computed for this specific turn, which the runtime must apply
-   * for tool decisions instead of the session's stored mode. Absent means the
-   * session's stored mode is used. Accepted only when the requested mode is
-   * narrower than or equal to the session's mode; a wider request is refused
-   * before the turn starts. The bridge forwards this end-to-end so the
-   * host-core scoping (still pending, R1 leftover) can enforce it turn-locally
-   * once it lands.
+   * Per-turn permission ceiling (spec §7.3). Host-core records it on the
+   * durable turn and applies the stricter of it and the current session mode
+   * to every tool decision of that turn, including delegated work. It never
+   * widens or rewrites the session setting. Absent means no ceiling; a value
+   * the Host cannot record refuses the prompt.
    */
   permissionMode?: RacpPermissionMode;
 };

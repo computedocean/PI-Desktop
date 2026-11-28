@@ -504,17 +504,9 @@ async function handle(method: string, params: any): Promise<unknown> {
         typeof params.userMessageId === "string" && params.userMessageId
           ? params.userMessageId
           : undefined;
-      // A `permissionMode` override on `agent.prompt` is the per-turn ceiling
-      // from spec §7.3 (R1 leftover). The sidecar accepts it so callers do not
-      // have to guard the field, but tool-approval enforcement still consults
-      // the session's stored mode inside host-core. Once host-core
-      // `session.beginTurn` accepts a per-turn override, this record will drive
-      // the enforcement gate; until then it stays a documented stub.
-      if (typeof params.permissionMode === "string" && params.permissionMode) {
-        // Log-only stub: observable in the sidecar log without affecting
-        // execution. Deliberately omitted from user-visible events.
-        void params.permissionMode;
-      }
+      // The per-turn permission ceiling (spec §7.3) is recorded on the
+      // durable turn by host-core and enforced on every `tools.execute`; the
+      // runtime carries no copy of it.
       const prompt: RuntimePrompt = {
         text: content,
         ...(params.backgroundCompletion ? { backgroundCompletion: params.backgroundCompletion } : {}),

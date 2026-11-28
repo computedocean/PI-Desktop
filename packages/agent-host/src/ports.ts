@@ -55,6 +55,12 @@ export type TurnStartRequest = {
   voiceOrigin?: VoiceOrigin;
   attachments?: AgentPromptAttachment[];
   effectivePermissionMode: RacpPermissionMode;
+  /**
+   * Ceiling the Host must enforce on every tool decision of this turn
+   * (spec §7.3). Present exactly when the admitting principal is bound by
+   * the remote ceiling; a runtime that cannot enforce it must refuse the turn.
+   */
+  permissionCeiling?: RacpPermissionMode;
   idempotencyKey?: string;
   principal: Principal;
 };
@@ -102,6 +108,8 @@ export type QueuedTurnRecord = {
   voiceOrigin?: VoiceOrigin;
   attachments?: AgentPromptAttachment[];
   effectivePermissionMode: RacpPermissionMode;
+  /** The admitting principal's ceiling, carried until the turn starts. */
+  permissionCeiling?: RacpPermissionMode;
   idempotencyKey?: string;
   /** Stable hash of the input, so a reused key with different input is a conflict. */
   inputHash: string;

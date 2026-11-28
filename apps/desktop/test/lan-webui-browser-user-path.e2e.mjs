@@ -223,9 +223,10 @@ const journey = String.raw`(async () => {
   return JSON.stringify(result);
 })()`;
 
-async function runPhone(t, script, { scan = false, blockCookie = false } = {}) {
+async function runPhone(t, script, { scan = false, blockCookie = false, prepare } = {}) {
   const { electronBinary } = resolveElectronBinary();
   const fake = desktop();
+  prepare?.(fake);
   const server = createLanServer({ handler: fake.workspace, assets: await assets() });
   const { port } = await server.start("127.0.0.1", 0);
   server.issueCode();
@@ -509,4 +510,51 @@ test("the shipped Markdown renderer keeps GFM structure and defuses unsafe input
   assert.equal(result.bareUrl, '<p>see <a href="https://ok.test/path" target="_blank" rel="noopener noreferrer">https://ok.test/path</a>.</p>');
   assert.equal(result.heading, "<h2>Title</h2>");
   assert.equal(result.softBreak, "<p>one\ntwo<br>three</p>");
+});
+
+const archivedProjectJourney = String.raw`(async () => {
+  const wait = async (check, label) => {
+    const deadline = performance.now() + 5000;
+    while (!check()) {
+      if (performance.now() > deadline) throw new Error("Timed out waiting for " + label);
+      await new Promise(requestAnimationFrame);
+    }
+  };
+  const view = () => document.getElementById("app").dataset.view;
+  const tap = (control) => {
+    control.scrollIntoView({ block: "center" });
+    const bounds = control.getBoundingClientRect();
+    const hit = document.elementFromPoint(bounds.left + bounds.width / 2, bounds.top + bounds.height / 2);
+    if (!hit || !control.contains(hit)) throw new Error("Pointer blocked by " + (hit?.id || hit?.className || "no target"));
+    hit.click();
+  };
+  await wait(() => document.getElementById("pair-code")?.value === window.__code, "scanned code");
+  document.querySelector('.pair button[type="submit"]').click();
+  await wait(() => view() === "home", "home");
+  location.hash = "#/s/s-a1";
+  await wait(() => view() === "chat:s-a1" && document.querySelector(".msg.user"), "archived conversation");
+  const notice = [...document.querySelectorAll(".notice")].find((node) => node.querySelector("button"));
+  const result = {
+    composer: Boolean(document.getElementById("composer-input")),
+    history: document.querySelector(".msg.user").textContent.includes("hello"),
+    notice: notice?.querySelector(".notice-text")?.textContent ?? null,
+  };
+  tap(notice.querySelector("button"));
+  await wait(() => document.getElementById("composer-input"), "composer after restoring the project");
+  result.noticesAfterRestore = document.querySelectorAll(".notice").length;
+  return JSON.stringify(result);
+})()`;
+
+test("a conversation in an archived project stays readable and continues after restoring the project", { timeout: 60_000 }, async (t) => {
+  const { result, fake } = await runPhone(t, archivedProjectJourney, {
+    scan: true,
+    prepare: (fake) => { fake.meta.projectMeta["/work/a"] = { archived: true }; },
+  });
+  assert.equal(result.composer, false, "no Send or Queue while the project is archived");
+  assert.equal(result.history, true);
+  assert.match(result.notice, /project is archived|项目已归档/);
+  assert.equal(result.noticesAfterRestore, 0);
+  assert.equal(fake.meta.projectMeta["/work/a"].archived, false);
+  assert.equal(fake.meta.sessionMeta["s-a1"], undefined, "restoring the project leaves the session's own state alone");
+  assert.equal(fake.turns.length, 0);
 });

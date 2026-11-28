@@ -10,7 +10,7 @@ import { expandSlashInvocation, visionFromModelConfig, type ComposerTemplate } f
 import { appendPromptFallbackPaths, durableUserMessageId, preparePromptAttachments, type PreparedPromptAttachment } from "../prompt-attachments";
 import { resolveSessionReferences } from "../session-references";
 import { resolvePromptAgentMentions } from "../agent-mentions";
-import { executionFromResponse, resolveSessionMessageInput } from "@pi-desktop/host-runtime";
+import { PERMISSION_CEILING_UNAVAILABLE, assertTurnCeilingRecorded, executionFromResponse, isPermissionCeiling, resolveSessionMessageInput, turnCeilingParams } from "@pi-desktop/host-runtime";
 import type { AgentExtensionBridge } from "../agent-extensions";
 import type { AgentHostBridge } from "../agent-host-bridge";
 import type { AgentSidecar } from "../agent-sidecar";
@@ -222,8 +222,20 @@ export function registerAgentIpc({
     const startGoal = goalStartRequested(req);
     if (!sidecar) throw new Error("sidecar unavailable");
     const voiceOrigin = parseVoiceOrigin(req.voiceOrigin);
+    // The per-turn ceiling (spec §7.3) only ever narrows, and only host-core
+    // can enforce it. A malformed one, or one on a path host-core does not
+    // authorize, refuses the prompt instead of running under the stored mode.
+    if (req.permissionMode !== undefined && !isPermissionCeiling(req.permissionMode)) {
+      throw Object.assign(new Error("Invalid per-turn permission ceiling"), { errorCode: ErrorCodes.INVALID_ARGUMENT });
+    }
+    const permissionCeiling = req.permissionMode;
     if (req.sessionId.startsWith("native-pi:")) {
       if (startGoal) rejectNativeAgentOperation(req.sessionId);
+      if (permissionCeiling) {
+        throw Object.assign(new Error("Native Pi sessions cannot enforce a per-turn permission ceiling"), {
+          errorCode: PERMISSION_CEILING_UNAVAILABLE,
+        });
+      }
       // Desktop-managed MCP servers are not installed in native Pi sessions.
       if (/^\/mcp:\S/.test(req.content)) expandMcpInvocation(req.content, []);
       if (voiceOrigin) {
@@ -246,6 +258,10 @@ export function registerAgentIpc({
     if (!host) throw new Error("host unavailable");
     if (background && background.host !== host) throw new Error("Background continuation belongs to an expired Host");
     if (startGoal && activeTurns.has(req.sessionId)) {
+      // Re-queueing under the Desktop principal would drop the ceiling.
+      if (permissionCeiling) {
+        throw Object.assign(new Error("Session already has an active turn"), { errorCode: ErrorCodes.AGENT_BUSY });
+      }
       const entry = await queueGoal({ ...req, userMessageId: req.messageId });
       return { accepted: true, turnId: entry.id };
     }
@@ -389,11 +405,12 @@ export function registerAgentIpc({
     sidecar.setProjectInstructionRoot(req.sessionId, launch.workspaceRoot ?? launch.projectPath);
 
     // Open a durable turn row, then persist the user message under it.
-    const turn = await host.call<{ turnId?: string }>("session.beginTurn", {
+    const turn = await host.call<{ turnId?: string; permissionCeiling?: unknown }>("session.beginTurn", {
       sessionId: req.sessionId,
       providerId: launch.providerId,
       modelId: launch.modelId,
       ...(sessionMessage ? { sessionMessageId: sessionMessage.origin.messageId } : {}),
+      ...turnCeilingParams(permissionCeiling),
     });
     const durableTurnId = String(turn?.turnId ?? "").trim();
     if (!durableTurnId) {
@@ -402,6 +419,12 @@ export function registerAgentIpc({
     activeTurns.set(req.sessionId, durableTurnId);
     recordTurnStart(req.sessionId, durableTurnId);
     activeTurnUsages.delete(req.sessionId);
+    try {
+      assertTurnCeilingRecorded(permissionCeiling, turn);
+    } catch (error) {
+      await finishTurn(req.sessionId, "error", PERMISSION_CEILING_UNAVAILABLE, { turnId: durableTurnId });
+      throw error;
+    }
 
     // A staged mode claims its run for this durable turn before anything runs;
     // the sidecar then executes the run's own definition snapshot.
@@ -695,11 +718,6 @@ export function registerAgentIpc({
             })),
           ],
           ...(modeOrigin || background ? {} : { userMessageId: userMessage.id }),
-          // Per-turn permission ceiling override (R1 leftover; spec §7.3). The
-          // sidecar records it on the turn context; enforcement of a NARROWER
-          // ceiling still routes through the session's stored mode until
-          // host-core `session.beginTurn` accepts the scoped param.
-          ...(req.permissionMode ? { permissionMode: req.permissionMode } : {}),
         },
       );
     } catch (e) {

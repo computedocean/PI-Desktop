@@ -33,6 +33,8 @@ mod plugin_reviews_rpc_tests;
 #[cfg(test)]
 mod review_rpc_tests;
 #[cfg(test)]
+mod turn_permission_tests;
+#[cfg(test)]
 mod visualization_tests;
 #[cfg(test)]
 mod write_scope_tests;
@@ -64,6 +66,7 @@ use crate::sessions::{self, UiMessage};
 use crate::state::{AppState, HOST_VERSION, PROTOCOL_VERSION};
 use crate::tools::{self, ToolsExecuteParams};
 use crate::transcripts::{self, CompactionRecord};
+use crate::turn_permissions;
 use crate::turn_queue;
 use crate::visualizations;
 use crate::workspace::{self, ContainedRoots, ToolRoot};
@@ -2866,9 +2869,10 @@ async fn handle_request(
             if let Some(project) = isolated_project.as_deref() {
                 worktree_rpc::ensure_local_project(&st.db, project)?;
             }
+            // A child started during a ceiling-bound parent turn starts no broader.
             let permission_mode = if let Some(parent_id) = permission_parent {
                 Some(
-                    sessions::session_permission_mode(&st.db, &parent_id)
+                    turn_permissions::inherited_mode(&st.db, &parent_id)
                         .map_err(|e| rpc_err(1000, e.to_string(), "INTERNAL"))?
                         .ok_or_else(|| rpc_err(1007, "parent session not found", "NOT_FOUND"))?,
                 )
@@ -3566,6 +3570,8 @@ async fn handle_request(
                 .get("sessionId")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| rpc_err(1002, "sessionId required", "INVALID_PARAMS"))?;
+            let ceiling = turn_permissions::parse_ceiling(params.get("permissionCeiling"))
+                .map_err(|message| rpc_err(1002, message, "INVALID_PARAMS"))?;
             let st = state.lock().await;
             let provider = params.get("providerId").and_then(Value::as_str);
             let model = params.get("modelId").and_then(Value::as_str);
@@ -3576,7 +3582,26 @@ async fn handle_request(
                 None => sessions::begin_turn(&st.db, session_id, provider, model),
             }
             .map_err(session_collaboration_rpc_err)?;
-            Ok(json!({ "turnId": turn_id }))
+            if let Some(ceiling) = ceiling.as_deref() {
+                // A turn that cannot hold its ceiling must not run at all.
+                if let Err(error) = turn_permissions::record(st.db.conn(), &turn_id, ceiling) {
+                    let code = "PERMISSION_CEILING_UNAVAILABLE";
+                    let mut message = error.to_string();
+                    if let Err(end_error) = sessions::end_turn_settling(
+                        &st.db,
+                        &turn_id,
+                        "error",
+                        Some(code),
+                        None,
+                        false,
+                        false,
+                    ) {
+                        message = format!("{message}; closing the turn failed: {end_error}");
+                    }
+                    return Err(rpc_err(1000, message, code));
+                }
+            }
+            Ok(json!({ "turnId": turn_id, "permissionCeiling": ceiling }))
         }
         "session.recordUsage" => {
             let session_id = params
@@ -4436,39 +4461,18 @@ async fn handle_request(
                     if st.shutting_down {
                         return Err(rpc_err(1001, "host is shutting down", "HOST_SHUTTING_DOWN"));
                     }
-                    // Effective permission mode (D115): per-session override
-                    // unless it is `inherit`, then the global settings default,
-                    // then `ask`. A subagent's tool call carries its own scope
-                    // (ADR 0089), which resolves the call under that mode
-                    // instead; external-path gating and the contract modes'
-                    // hard deny are untouched by the override.
-                    let session_pm = sessions::session_permission_mode(&st.db, &p.session_id)
-                        .map_err(|e| rpc_err(1000, e.to_string(), "INTERNAL"))?
-                        .filter(|m| m != "inherit");
-                    let effective_pm = match session_pm {
-                        Some(m) => m,
-                        None => st
-                            .db
-                            .get_setting("app")
-                            .ok()
-                            .flatten()
-                            .and_then(|s| {
-                                s.get("defaultPermissionMode")
-                                    .and_then(|v| v.as_str())
-                                    .map(str::to_string)
-                            })
-                            .filter(|m| sessions::is_valid_permission_mode(m) && m != "inherit")
-                            .unwrap_or_else(|| "ask".to_string()),
-                    };
-                    let effective_pm = match p.permission_scope.as_deref() {
-                        Some(scope)
-                            if sessions::is_valid_permission_mode(scope) && scope != "inherit" =>
-                        {
-                            scope.to_string()
-                        }
-                        _ => effective_pm,
-                    };
-                    let effective_pm = authorization.cap_permission_mode(effective_pm);
+                    // Effective permission mode (D115): the session mode, or a
+                    // subagent's own scope (ADR 0089), then the ceiling of the
+                    // turn the call belongs to. External-path gating and the
+                    // contract modes' hard deny are untouched by either.
+                    let effective_pm = turn_permissions::effective_tool_mode(
+                        &st.db,
+                        &p.session_id,
+                        p.turn_id.as_deref(),
+                        p.permission_scope.as_deref(),
+                        &authorization,
+                    )
+                    .map_err(|e| rpc_err(1000, e.to_string(), "INTERNAL"))?;
                     let (ws, _) = file_batches::resolve_root(&st, &p)?;
                     let scratch = scratch::session_dir(&st.data_dir, &p.session_id);
                     let contained_roots = if workspace_only {
@@ -5252,27 +5256,14 @@ async fn handle_request(
             else {
                 return Err(rpc_err(1007, "session not found", "SESSION_NOT_FOUND"));
             };
-            let session_pm = sessions::session_permission_mode(&st.db, session_id)
-                .map_err(|e| rpc_err(1000, e.to_string(), "INTERNAL"))?
-                .filter(|value| value != "inherit");
-            let effective_pm = session_pm
-                .or_else(|| {
-                    st.db
-                        .get_setting("app")
-                        .ok()
-                        .flatten()
-                        .and_then(|settings| {
-                            settings
-                                .get("defaultPermissionMode")
-                                .and_then(|value| value.as_str())
-                                .filter(|value| {
-                                    sessions::is_valid_permission_mode(value) && *value != "inherit"
-                                })
-                                .map(str::to_string)
-                        })
-                })
-                .unwrap_or_else(|| "ask".into());
-            let effective_pm = authorization.cap_permission_mode(effective_pm);
+            let effective_pm = turn_permissions::effective_tool_mode(
+                &st.db,
+                session_id,
+                params.get("turnId").and_then(Value::as_str),
+                None,
+                &authorization,
+            )
+            .map_err(|e| rpc_err(1000, e.to_string(), "INTERNAL"))?;
             let args = params.get("args").cloned().unwrap_or_else(|| json!({}));
             let workspace_path = resolve_tool_workspace_for_call(&st, session_id, &args)?;
             let external_path_permission =

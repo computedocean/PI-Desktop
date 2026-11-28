@@ -85,6 +85,18 @@ pub fn authorize_registration(
             "The originating turn is no longer running".into(),
         ));
     }
+    // The continuation starts a later Desktop turn under the session mode, so
+    // a turn held to a remote permission ceiling cannot arrange one.
+    if crate::turn_permissions::for_call(st.db.conn(), session_id, Some(turn_id))
+        .map_err(|e| internal(e.to_string()))?
+        .is_some()
+    {
+        return Err((
+            "PERMISSION_DENIED".into(),
+            "Automatic continuation is unavailable under a remote permission ceiling; use TaskWait instead"
+                .into(),
+        ));
+    }
     if st
         .background_tasks
         .continuations

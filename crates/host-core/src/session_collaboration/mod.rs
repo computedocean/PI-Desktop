@@ -65,7 +65,11 @@ fn send_record(db: &Database, input: &Value, target: &str, kind: &str) -> Result
             "PERMISSION_DENIED: session communication requires Agent mode"
         ));
     }
-    let permission_ceiling = permissions::effective_mode(db, source)?;
+    // A message sent during a ceiling-bound turn carries that turn's ceiling.
+    let permission_ceiling = crate::turn_permissions::clamp(
+        permissions::effective_mode(db, source)?,
+        crate::turn_permissions::for_call(db.conn(), source, None)?.as_deref(),
+    );
     permissions::check_target(db, target, &permission_ceiling)?;
     let pending: i64 = db.conn().query_row(
         "SELECT COUNT(*) FROM session_collaboration_messages

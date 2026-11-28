@@ -41,6 +41,10 @@ pub struct QueuedTurnInput {
     pub voice_origin: Option<VoiceOrigin>,
     pub attachments: Option<Value>,
     pub permission_mode: String,
+    /// Host-enforced ceiling of the turn this entry starts (spec §7.3);
+    /// absent when no ceiling binds the admitting principal.
+    #[serde(default)]
+    pub permission_ceiling: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -63,6 +67,8 @@ pub struct QueuedTurn {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attachments: Option<Value>,
     pub permission_mode: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub permission_ceiling: Option<String>,
     pub position: i64,
     /// Set once the entry is promoted ("send now"). The value is the entry's
     /// place inside the session's priority block, so promotions leave in the
@@ -97,6 +103,7 @@ fn row_to_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<QueuedTurn> {
         session_message_id: row.get(10)?,
         attachments: attachments.and_then(|text| serde_json::from_str(&text).ok()),
         permission_mode: row.get(7)?,
+        permission_ceiling: row.get(15)?,
         position: row.get(8)?,
         priority: row.get(11)?,
         user_message_id: row.get(12)?,
@@ -107,7 +114,7 @@ fn row_to_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<QueuedTurn> {
 
 const SELECT: &str = "SELECT id, session_id, principal, idempotency_key, input_hash, content,
         attachments_json, permission_mode, position, created_at, session_message_id, priority,
-        user_message_id, voice_origin_json, start_goal
+        user_message_id, voice_origin_json, start_goal, permission_ceiling
  FROM turn_queue";
 
 /// Delivery order: promoted entries first in click order (ascending
@@ -131,6 +138,11 @@ pub fn push(db: &Database, input: QueuedTurnInput) -> Result<QueuedTurn> {
             return Err(anyhow!(
                 "INVALID_ARGUMENT: invalid voice-origin queue metadata"
             ));
+        }
+    }
+    if let Some(ceiling) = input.permission_ceiling.as_deref() {
+        if !crate::turn_permissions::is_ceiling_mode(ceiling) {
+            return Err(anyhow!("INVALID_ARGUMENT: invalid permission ceiling"));
         }
     }
     let conn = db.conn();
@@ -187,8 +199,8 @@ pub fn push(db: &Database, input: QueuedTurnInput) -> Result<QueuedTurn> {
         "INSERT INTO turn_queue (
             id, session_id, principal, idempotency_key, input_hash, content,
             attachments_json, permission_mode, position, created_at, session_message_id,
-            user_message_id, voice_origin_json, start_goal
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            user_message_id, voice_origin_json, start_goal, permission_ceiling
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
         params![
             id,
             input.session_id,
@@ -203,7 +215,8 @@ pub fn push(db: &Database, input: QueuedTurnInput) -> Result<QueuedTurn> {
             input.session_message_id,
             input.user_message_id,
             voice_origin_json,
-            input.start_goal
+            input.start_goal,
+            input.permission_ceiling
         ],
     )?;
     tx.commit()?;
@@ -220,6 +233,7 @@ pub fn push(db: &Database, input: QueuedTurnInput) -> Result<QueuedTurn> {
         voice_origin: input.voice_origin,
         attachments: input.attachments,
         permission_mode: input.permission_mode,
+        permission_ceiling: input.permission_ceiling,
         position: max_position + 1,
         priority: None,
         created_at: ms_to_ts(created_at),
@@ -393,8 +407,41 @@ mod tests {
             voice_origin: None,
             attachments: None,
             permission_mode: "ask".into(),
+            permission_ceiling: None,
             start_goal: false,
         }
+    }
+
+    #[test]
+    fn a_permission_ceiling_survives_restart_and_is_validated() {
+        let (dir, db, session) = open_with_session();
+        let mut phone = input(&session, "from phone", Some("phone-key"));
+        phone.principal = "lan:device".into();
+        phone.permission_ceiling = Some("ask".into());
+        push(&db, phone).unwrap();
+        push(&db, input(&session, "from desktop", None)).unwrap();
+        let mut invalid = input(&session, "bad", None);
+        invalid.permission_ceiling = Some("inherit".into());
+        assert!(push(&db, invalid)
+            .unwrap_err()
+            .to_string()
+            .starts_with("INVALID_ARGUMENT"));
+        drop(db);
+        let db = Database::open_in_dir(dir.path()).unwrap();
+        let restored = list(&db, Some(&session)).unwrap();
+        assert_eq!(
+            restored
+                .iter()
+                .map(|entry| entry.permission_ceiling.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("ask"), None]
+        );
+        let json = serde_json::to_value(&restored[0]).unwrap();
+        assert_eq!(json["permissionCeiling"], "ask");
+        assert!(serde_json::to_value(&restored[1])
+            .unwrap()
+            .get("permissionCeiling")
+            .is_none());
     }
 
     #[test]

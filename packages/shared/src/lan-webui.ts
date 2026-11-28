@@ -28,6 +28,12 @@ export interface LanSession {
    * from responses of builds that predate it.
    */
   projectLabel?: string | null;
+  /**
+   * The parent project is archived. History stays readable, but nothing can
+   * be sent or queued until the project is restored. Independent of the
+   * session's own `archived` flag. Optional: absent from older builds.
+   */
+  projectArchived?: boolean;
 }
 export interface LanPage<T> {
   items: T[];

@@ -323,6 +323,22 @@ holds `approver` and Host policy allows approvers to use the session's own
 mode. The applied value is reported as `effectivePermissionMode` and never
 changes the durable session mode.
 
+The Agent Host derives the ceiling from the authenticated principal, never
+from client input, and host-core enforces it. `session.beginTurn` records the
+ceiling on the durable turn, and a queued turn carries it in its queue record,
+including across a restart. Every tool authorization takes the stricter of the
+session mode current at that decision and the ceiling of the turn the call
+belongs to, so a later session change, a subagent's own permission scope, or
+delegated work that outlives the turn cannot broaden it. A session created
+while a ceiling-bound turn of its parent is running inherits no broader mode,
+and a session message sent during that turn carries no broader ceiling. Such a
+turn cannot arrange an automatic background-job continuation, which would
+start a later Desktop turn under the session mode. A turn
+whose ceiling the Host cannot record does not run, and the client receives
+`PERMISSION_CEILING_UNAVAILABLE`. Existing approvals, workspace and path checks
+are unchanged; anything that needs a decision under `ask` uses the existing
+local approval flow.
+
 The ceiling applies to Gateway-routed principals. A desktop device paired
 through the SSH bootstrap (§3.4) holds `owner` on that Host and is exempt:
 an SSH login already grants shell access to the machine, so a ceiling would

@@ -181,6 +181,30 @@ describe("Task delegation on the real child loop", () => {
     expect(calls).toEqual([expect.objectContaining({ toolName: "Write", permissionScope: "ask", writeScope: ["src/parser"] })]);
   });
 
+  it("keeps the starting turn on a delegate's Host calls after the parent moves on", async () => {
+    // The Host applies the permission ceiling of the turn a call names, so a
+    // delegate started by a phone turn must keep naming that turn.
+    const calls: Array<Record<string, unknown>> = [];
+    const gate = deferred();
+    const f = await modelServer(async (req, res) => {
+      if (req.messages.some((m) => m.role === "tool")) return reply(res, req.model, "Done.");
+      await gate.promise;
+      reply(res, req.model, "", [{ name: "Write", args: { path: "out.txt", content: "x" } }]);
+    });
+    const { runtime } = session(f.provider("fixture"), (method, params) => {
+      if (method !== "tools.execute") return undefined;
+      calls.push(params as Record<string, unknown>);
+      return { ok: true, content: "written" };
+    });
+    const turn = runtime as unknown as { turnId?: string };
+    turn.turnId = "phone-turn";
+    const id = resultId(await tool(runtime, "Task").execute("task", { agent: "fixer", task: "Write the file." }));
+    turn.turnId = "desktop-turn";
+    gate.resolve();
+    await waitForTask(runtime, id);
+    expect(calls).toEqual([expect.objectContaining({ toolName: "Write", turnId: "phone-turn" })]);
+  });
+
   it.each(["fabricated", "substitute", "omitted", "other expert", "truncated"])("blocks a %s quote or role before launching a child", async (kind) => {
     const first = "@fixer Only review `src/parser`. Do not edit.\n";
     const second = "@reviewer Verify `docs/`.";

@@ -37,6 +37,7 @@ import {
   deltaStreamPayloadFits,
   effectiveRemotePermissionMode,
   racpKindForAgentEvent,
+  remotePermissionCeiling,
   rolesAllowOperation,
 } from "@pi-desktop/shared";
 
@@ -150,6 +151,8 @@ type TurnRecord = RacpTurn & {
   /** The runtime's own turn id when it differs from the RACP id (queued turns). */
   runtimeTurnId?: string;
   principalSubject?: string;
+  /** Host-enforced ceiling of the admitting principal (spec §7.3). */
+  permissionCeiling?: RacpPermissionMode;
 };
 
 type SessionState = {
@@ -519,12 +522,13 @@ export class AgentHost {
         details: { expectedRevision: expected, revision: state.revision },
       });
     }
-    const effectivePermissionMode = effectiveRemotePermissionMode({
-      sessionMode: summary.permissionMode,
+    const ceilingInput = {
       policy: this.policy,
       pairedDevice: principal.pairedDevice ?? false,
       approverOverride: principal.approverOverride ?? false,
-    });
+    };
+    const effectivePermissionMode = effectiveRemotePermissionMode({ ...ceilingInput, sessionMode: summary.permissionMode });
+    const permissionCeiling = remotePermissionCeiling(ceilingInput);
     const admission: RacpTurnAdmission = forceQueue ? "queue" : params.admission ?? "reject_if_busy";
     const busy = this.isBusy(state);
     const modeOrigin = params[TRUSTED_MODE_ORIGIN];
@@ -549,6 +553,7 @@ export class AgentHost {
         ...(params.input.voiceOrigin ? { voiceOrigin: params.input.voiceOrigin } : {}),
         ...(params.input.attachments ? { attachments: params.input.attachments } : {}),
         effectivePermissionMode,
+        ...(permissionCeiling ? { permissionCeiling } : {}),
         ...(idempotencyKey ? { idempotencyKey } : {}),
         inputHash,
         createdAt: this.clock.now(),
@@ -559,6 +564,7 @@ export class AgentHost {
       turn.admission = "queue";
       turn.queuePosition = position;
       turn.effectivePermissionMode = effectivePermissionMode;
+      turn.permissionCeiling = permissionCeiling;
       turn.idempotencyKey = idempotencyKey;
       turn.principalSubject = principal.subject;
       this.emit(state, "turn.queued", { turn: this.toRacpTurn(state, turn) }, { turnId: turn.id });
@@ -577,6 +583,7 @@ export class AgentHost {
         ...(params.input.voiceOrigin ? { voiceOrigin: params.input.voiceOrigin } : {}),
         ...(params.input.attachments ? { attachments: params.input.attachments } : {}),
         effectivePermissionMode,
+        ...(permissionCeiling ? { permissionCeiling } : {}),
         ...(idempotencyKey ? { idempotencyKey } : {}),
         principal,
       });
@@ -584,6 +591,7 @@ export class AgentHost {
       if (!isTerminal(turn.status) && !isActive(turn.status)) turn.status = "running";
       turn.admission = admission;
       turn.effectivePermissionMode = effectivePermissionMode;
+      turn.permissionCeiling = permissionCeiling;
       turn.idempotencyKey = idempotencyKey;
       turn.principalSubject = principal.subject;
       state.activeTurnId = turn.id;
@@ -1014,10 +1022,12 @@ export class AgentHost {
             ...(record.voiceOrigin ? { voiceOrigin: record.voiceOrigin } : {}),
             ...(record.attachments ? { attachments: record.attachments } : {}),
             effectivePermissionMode: record.effectivePermissionMode,
+            ...(record.permissionCeiling ? { permissionCeiling: record.permissionCeiling } : {}),
             ...(record.idempotencyKey ? { idempotencyKey: record.idempotencyKey } : {}),
             principal: { subject: record.principalSubject, roles: ["controller"] },
           });
           turn.runtimeTurnId = started.turnId;
+          turn.permissionCeiling = record.permissionCeiling;
           this.runtimeAliases.set(started.turnId, turn.id);
           if (!isActive(turn.status)) turn.status = "running";
           turn.queuePosition = undefined;
@@ -1095,6 +1105,8 @@ export class AgentHost {
           ? state.permissionMode
           : active?.effectivePermissionMode;
         if (activePermissionMode !== record.effectivePermissionMode) return undefined;
+        // Input joins only a turn held to the same Host ceiling.
+        if (active?.permissionCeiling !== record.permissionCeiling) return undefined;
         const turn = this.ensureTurn(state, record.id);
         if (turn.deliveryPending || turn.deliveredIntoTurnId) return undefined;
         turn.deliveryPending = true;

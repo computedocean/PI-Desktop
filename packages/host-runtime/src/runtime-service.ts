@@ -15,6 +15,11 @@ import {
 import type { LaunchResolver } from "./launch-resolver.js";
 import { resolveSessionMessageInput } from "./session-message-input.js";
 import { TurnEventPipeline } from "./turn-events.js";
+import {
+  PERMISSION_CEILING_UNAVAILABLE,
+  assertTurnCeilingRecorded,
+  turnCeilingParams,
+} from "./turn-permission-ceiling.js";
 
 /** host-core as the turn lifecycle drives it. `HostProcess` satisfies it. */
 export type RuntimeHostLink = {
@@ -281,18 +286,6 @@ export class RuntimeService implements RuntimePort {
     }
   }
 
-  /** True when the effective per-turn mode narrows or otherwise differs from
-   * the session's stored `permissionMode`; used to decide whether to forward a
-   * per-turn override to the sidecar. A widening request has already been
-   * refused by the agent-host bridge before reaching here. */
-  private sessionModeDiffers(
-    session: Record<string, unknown> | null | undefined,
-    effective: string,
-  ): boolean {
-    const stored = session && typeof session.permissionMode === "string" ? session.permissionMode : undefined;
-    return stored !== undefined && stored !== effective;
-  }
-
   private async startTurn(sessionId: string, request: TurnStartRequest): Promise<{ turnId: string }> {
     const host = this.requireHost();
     const sidecar = this.requireSidecar();
@@ -313,7 +306,9 @@ export class RuntimeService implements RuntimePort {
     const launch = await this.options.launch.resolve(sessionId, session, settings ?? {});
     sidecar.setProjectInstructionRoot(sessionId, launch.projectPath);
 
-    const turnId = await this.beginTurn(sessionId, launch.providerId, launch.modelId, sessionMessage?.origin.messageId);
+    const turnId = await this.beginTurn(
+      sessionId, launch.providerId, launch.modelId, sessionMessage?.origin.messageId, request.permissionCeiling,
+    );
 
     let content = sessionMessage?.content ?? request.content;
     let command: string | undefined;
@@ -360,13 +355,6 @@ export class RuntimeService implements RuntimePort {
         ...(sessionMessage ? { sessionMessage: sessionMessage.origin } : {}),
         attachments: [],
         userMessageId: userMessage.id,
-        // Per-turn permission ceiling override (R1 leftover; spec §7.3). Only
-        // forwarded when the effective mode differs from the session's stored
-        // mode — a widening request has already been refused upstream so any
-        // override that reaches here is narrower than or equal to session.
-        ...(request.effectivePermissionMode && this.sessionModeDiffers(session, request.effectivePermissionMode)
-          ? { permissionMode: request.effectivePermissionMode }
-          : {}),
       });
     } catch (error) {
       await this.finishTurn(sessionId, "error", errorCodeOf(error), { turnId });
@@ -528,18 +516,35 @@ export class RuntimeService implements RuntimePort {
     }
   }
 
-  /** Open a durable turn row and take ownership of the session for it. */
-  async beginTurn(sessionId: string, providerId: string, modelId: string, sessionMessageId?: string): Promise<string> {
-    const turn = await this.requireHost().call<{ turnId?: string }>("session.beginTurn", {
+  /**
+   * Open a durable turn row and take ownership of the session for it. A
+   * `permissionCeiling` is recorded on the row and bounds every tool decision
+   * of the turn; a Host that does not confirm it gets no turn.
+   */
+  async beginTurn(
+    sessionId: string,
+    providerId: string,
+    modelId: string,
+    sessionMessageId?: string,
+    permissionCeiling?: TurnStartRequest["permissionCeiling"],
+  ): Promise<string> {
+    const turn = await this.requireHost().call<{ turnId?: string; permissionCeiling?: unknown }>("session.beginTurn", {
       sessionId,
       providerId,
       modelId,
       ...(sessionMessageId ? { sessionMessageId } : {}),
+      ...turnCeilingParams(permissionCeiling),
     });
     const turnId = String(turn?.turnId ?? "").trim();
     if (!turnId) throw new Error("session.beginTurn returned no turn");
     this.activeTurns.set(sessionId, turnId);
     this.events.resetTurnUsage(sessionId);
+    try {
+      assertTurnCeilingRecorded(permissionCeiling, turn);
+    } catch (error) {
+      await this.finishTurn(sessionId, "error", PERMISSION_CEILING_UNAVAILABLE, { turnId });
+      throw error;
+    }
     return turnId;
   }
 

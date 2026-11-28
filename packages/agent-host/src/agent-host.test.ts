@@ -436,6 +436,8 @@ describe("AgentHost turns", () => {
     expect(started.turn.status).toBe("running");
     expect(started.turn.effectivePermissionMode).toBe("ask");
     expect(runtime.prompts[0]!.effectivePermissionMode).toBe("ask");
+    // The Host, not the runtime's session read, enforces this bound.
+    expect(runtime.prompts[0]!.permissionCeiling).toBe("ask");
     const again = await host.startTurn(controller, {
       sessionId: "s1",
       idempotencyKey: "k1",
@@ -456,6 +458,7 @@ describe("AgentHost turns", () => {
     ).rejects.toMatchObject({ code: "CONFLICT" });
     const started = await host.startTurn(owner, { sessionId: "s1", input: { text: "x" }, context: { requestId: "r", expectedRevision: 0 } });
     expect(started.turn.effectivePermissionMode).toBe("auto");
+    expect(runtime.prompts[0]!.permissionCeiling).toBeUndefined();
     expect(runtime.prompts[0]!.principal.subject).toBe("desktop");
     await expect(host.startTurn(viewer, { sessionId: "s1", input: { text: "x" }, context: { requestId: "r" } })).rejects.toMatchObject({
       code: "FORBIDDEN",
@@ -641,6 +644,35 @@ describe("AgentHost turns", () => {
     host.endTurn("s1", "rt_1", "completed");
     await vi.waitFor(() => expect(runtime.prompts).toHaveLength(2));
     expect(runtime.prompts[1]?.effectivePermissionMode).toBe("ask");
+    expect(runtime.prompts[0]?.permissionCeiling).toBeUndefined();
+    expect(runtime.prompts[1]?.permissionCeiling).toBe("ask");
+  });
+
+  it("does not fold a ceiling-bound promoted row into an exempt turn even when the modes match", async () => {
+    const store = new MemoryQueueStore();
+    const { host, runtime } = build({ permissionMode: "ask", queueStore: store });
+    runtime.refuseSteers = true;
+    const first = await host.startTurn(owner, { sessionId: "s1", input: { text: "one" }, context: { requestId: "r1" } });
+    host.ingest(envelope("s1", first.turn.id, { type: "agent_start" }));
+    const desktop = await host.startTurn(owner, { sessionId: "s1", admission: "queue", input: { text: "desktop follow-up" }, context: { requestId: "r2" } });
+    const phone = await host.startTurn(controller, { sessionId: "s1", admission: "queue", input: { text: "phone input" }, context: { requestId: "r3" } });
+    // The ceiling survives the durable queue record.
+    expect((await store.listAll()).map((record) => record.permissionCeiling)).toEqual([undefined, "ask"]);
+    await host.prioritizeTurn(owner, desktop.turn.id);
+    await host.prioritizeTurn(controller, phone.turn.id);
+
+    runtime.refuseSteers = false;
+    host.ingest(envelope("s1", first.turn.id, { type: "agent_end", messageIds: [] }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // Equal modes no longer suffice: the Desktop turn has no Host ceiling.
+    expect(runtime.prompts.map((prompt) => prompt.content)).toEqual(["one", "desktop follow-up"]);
+    expect(runtime.steers).toEqual([]);
+    expect(host.queueEntries("s1").map((entry) => entry.turn.id)).toEqual([phone.turn.id]);
+    host.endTurn("s1", "rt_2", "completed");
+    await vi.waitFor(() => expect(runtime.prompts).toHaveLength(3));
+    expect(runtime.prompts[2]).toMatchObject({ content: "phone input", permissionCeiling: "ask" });
   });
 
   it("delivers into an externally started Desktop turn using the stored session mode", async () => {

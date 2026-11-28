@@ -28,7 +28,7 @@ pub use engine::{
 };
 pub use gates::{complete_stage, gate_result, GateExecution, GateExecutions};
 pub use model::{CompleteStageParams, GateResultParams, ModeRun, SessionParams, StartParams};
-pub use policy::{authorization, tool_policy, tool_policy_conn, ToolPolicy};
+pub use policy::{authorization, tool_policy, tool_policy_conn, Authorization, ToolPolicy};
 pub use return_mode::settle_return;
 
 /// Mode ids are `^[a-z][a-z0-9-]{0,39}$`, shared with `MODE_ID_RE` in

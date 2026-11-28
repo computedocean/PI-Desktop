@@ -241,6 +241,30 @@ describe("host ports", () => {
     });
   });
 
+  it("carries the per-turn permission ceiling through the durable queue", async () => {
+    const calls: Array<{ method: string; params: Record<string, unknown> }> = [];
+    const entry = (permissionCeiling?: string) => ({
+      id: "q", sessionId: "s", principal: "lan:phone", inputHash: "h", content: "c",
+      permissionMode: "ask", position: 1, createdAt: "2026-09-18T00:00:00.000Z",
+      ...(permissionCeiling === undefined ? {} : { permissionCeiling }),
+    });
+    const store = createHostQueueStore(() => ({
+      async call<T>(method: string, params: Record<string, unknown> = {}) {
+        calls.push({ method, params });
+        return {} as T;
+      },
+    }));
+    const record = fromHostQueueEntry(entry("ask"));
+    expect(record.permissionCeiling).toBe("ask");
+    await store.push(record);
+    expect(calls.at(-1)?.params.permissionCeiling).toBe("ask");
+    // No ceiling stays no ceiling; an unreadable one fails closed to `ask`.
+    expect(fromHostQueueEntry(entry())).not.toHaveProperty("permissionCeiling");
+    expect(fromHostQueueEntry(entry("bogus")).permissionCeiling).toBe("ask");
+    await store.push(fromHostQueueEntry(entry()));
+    expect(calls.at(-1)?.params).not.toHaveProperty("permissionCeiling");
+  });
+
   it("fails closed when the host is gone", async () => {
     const store = createHostQueueStore(() => null);
     expect(await store.listAll()).toEqual([]);

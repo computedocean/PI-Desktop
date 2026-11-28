@@ -826,14 +826,25 @@ export type RacpCeilingInput = {
 };
 
 /**
+ * The ceiling the Host must hold a remote-initiated turn to, or `undefined`
+ * when the principal is exempt. Host-core applies it to every tool decision
+ * of that turn, against the session mode current at the decision.
+ */
+export function remotePermissionCeiling(
+  input: Omit<RacpCeilingInput, "sessionMode">,
+): RacpPermissionMode | undefined {
+  const exempt =
+    (input.pairedDevice && !input.policy.applyCeilingToPairedDevices) || input.approverOverride;
+  return exempt ? undefined : input.policy.remoteMaxPermissionMode;
+}
+
+/**
  * The mode a remote-initiated turn actually runs under: the lower of the
  * session mode and the ceiling, unless the principal is exempt.
  */
 export function effectiveRemotePermissionMode(input: RacpCeilingInput): RacpPermissionMode {
-  const exempt =
-    (input.pairedDevice && !input.policy.applyCeilingToPairedDevices) || input.approverOverride;
-  if (exempt) return input.sessionMode;
-  const ceiling = input.policy.remoteMaxPermissionMode;
+  const ceiling = remotePermissionCeiling(input);
+  if (!ceiling) return input.sessionMode;
   return PERMISSION_MODE_RANK[input.sessionMode] <= PERMISSION_MODE_RANK[ceiling]
     ? input.sessionMode
     : ceiling;

@@ -15,6 +15,8 @@ class FakeHost implements RuntimeHostLink {
   private turnCounter = 0;
   messages = new Map<string, UiMessage[]>();
   failAppend = false;
+  /** Answer `session.beginTurn` like a Host that predates the turn ceiling. */
+  ignoreCeiling = false;
   session: Record<string, unknown> = { id: "s1", mode: "agent", permissionMode: "ask", providerId: "p1", modelId: "m1" };
 
   async call<T = unknown>(method: string, params: Record<string, unknown> = {}): Promise<T> {
@@ -27,7 +29,10 @@ class FakeHost implements RuntimeHostLink {
         return { session: { ...this.session, id: params.id, messages: this.messages.get(String(params.id)) ?? [] } } as T;
       case "session.beginTurn":
         this.turnCounter += 1;
-        return { turnId: `turn-${this.turnCounter}` } as T;
+        return {
+          turnId: `turn-${this.turnCounter}`,
+          ...(params.permissionCeiling && !this.ignoreCeiling ? { permissionCeiling: params.permissionCeiling } : {}),
+        } as T;
       case "session.appendMessage": {
         if (this.failAppend) throw Object.assign(new Error("disk full"), { errorCode: "INTERNAL" });
         const list = this.messages.get(String(params.sessionId)) ?? [];
@@ -228,6 +233,35 @@ function holdNextCall(link: FakeHost | FakeSidecar, method: string) {
   };
   return { reached, release };
 }
+
+describe("RuntimeService per-turn permission ceiling", () => {
+  const phone = { subject: "lan:phone", roles: ["controller" as const], pairedDevice: false };
+
+  it("records the ceiling on the durable Host turn instead of the runtime prompt", async () => {
+    const { host, sidecar, service } = build();
+    host.session = { ...host.session, permissionMode: "auto" };
+    await service.prompt({ sessionId: "s1", content: "from phone", effectivePermissionMode: "ask", permissionCeiling: "ask", principal: phone });
+    expect(host.calls.find((call) => call.method === "session.beginTurn")?.params.permissionCeiling).toBe("ask");
+    expect(sidecar.calls.find((call) => call.method === "agent.prompt")?.params).not.toHaveProperty("permissionMode");
+    await service.prompt({ sessionId: "s2", content: "from desktop", effectivePermissionMode: "auto", principal: owner });
+    expect(host.calls.filter((call) => call.method === "session.beginTurn")[1]?.params).not.toHaveProperty("permissionCeiling");
+    await service.dispose();
+  });
+
+  it("starts nothing when the Host does not confirm the ceiling", async () => {
+    const { host, sidecar, service, ended } = build();
+    host.ignoreCeiling = true;
+    await expect(service.prompt({ sessionId: "s1", content: "from phone", effectivePermissionMode: "ask", permissionCeiling: "ask", principal: phone }))
+      .rejects.toMatchObject({ errorCode: "PERMISSION_CEILING_UNAVAILABLE" });
+    expect(sidecar.calls.some((call) => call.method === "agent.prompt")).toBe(false);
+    expect(host.calls.some((call) => call.method === "session.appendMessage")).toBe(false);
+    expect(host.calls.find((call) => call.method === "session.endTurn")?.params)
+      .toMatchObject({ turnId: "turn-1", status: "error", errorCode: "PERMISSION_CEILING_UNAVAILABLE" });
+    expect(ended).toEqual([expect.objectContaining({ turnId: "turn-1" })]);
+    expect(service.isBusy("s1")).toBe(false);
+    await service.dispose();
+  });
+});
 
 describe("RuntimeService startup cancellation", () => {
   for (const targeted of [false, true]) {
