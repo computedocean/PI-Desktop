@@ -12,6 +12,7 @@ import {
   type LanSession,
   type ProjectGroupRecord,
 } from "@pi-desktop/shared";
+import { PERMISSION_CEILING_UNAVAILABLE } from "@pi-desktop/host-runtime";
 import { readLanModelOptions, type ReadCachedModels } from "./models";
 import type { LanMeta, LanOrganization } from "./organization";
 import { normalizeProjectKey } from "./organization";
@@ -95,6 +96,8 @@ function oneOrganizeField(body: Record<string, unknown>): ["name", string] | ["p
 
 export function createLanWorkspace(deps: LanWorkspaceDeps) {
   const live = new Map<string, string>();
+  /** Sends past their archive check whose turn the Agent Host has not yet admitted. */
+  const admitting = new Map<string, number>();
   const listeners = new Set<(change: LanChange) => void>();
   const timers = new Map<string, ReturnType<typeof setTimeout>>();
 
@@ -167,7 +170,13 @@ export function createLanWorkspace(deps: LanWorkspaceDeps) {
     return index.get(normalizeProjectKey(path))?.id;
   }
 
-  function sessionView(session: HostSession, projectId: string | null, meta: LanMeta, projectLabel: string | null = null): LanSession {
+  function sessionView(
+    session: HostSession,
+    projectId: string | null,
+    meta: LanMeta,
+    projectLabel: string | null = null,
+    projectArchived = false,
+  ): LanSession {
     const own = meta.sessionMeta[session.id] ?? {};
     const title = session.title?.trim() || "";
     const pinned = own.pinned === true;
@@ -184,6 +193,8 @@ export function createLanWorkspace(deps: LanWorkspaceDeps) {
       status: running ? "running" : "idle",
       updatedAt: session.updatedAt ?? "",
       projectLabel,
+      // The parent's flag, never folded into the session's own archive state.
+      projectArchived,
     };
   }
 
@@ -209,7 +220,7 @@ export function createLanWorkspace(deps: LanWorkspaceDeps) {
     const label = projectId === null ? null : projectLabels(list, meta).get(projectId) ?? null;
     const group = projectId === null ? undefined : list.find((candidate) => candidate.id === projectId);
     const projectArchived = group !== undefined && projectView(group, meta).archived;
-    return { session, view: sessionView(session, projectId, meta, label), projectArchived };
+    return { session, view: sessionView(session, projectId, meta, label, projectArchived), projectArchived, group };
   }
 
   function projectLabels(list: ProjectGroupRecord[], meta: LanMeta): Map<string, string> {
@@ -266,7 +277,10 @@ export function createLanWorkspace(deps: LanWorkspaceDeps) {
       if (projectId === undefined) continue;
       if (!everywhere && projectId !== (wantTemporary ? null : requested)) continue;
       if (everywhere && !archivedOnly && projectId !== null && archivedProjects.has(projectId)) continue;
-      const view = sessionView(session, projectId, meta, projectId === null ? null : labels.get(projectId) ?? null);
+      const view = sessionView(
+        session, projectId, meta, projectId === null ? null : labels.get(projectId) ?? null,
+        projectId !== null && archivedProjects.has(projectId),
+      );
       if (view.archived === archivedOnly && matches(view.title, q)) items.push(view);
     }
     items.sort(everywhere
@@ -330,6 +344,19 @@ export function createLanWorkspace(deps: LanWorkspaceDeps) {
   }
 
   type LocalSession = Awaited<ReturnType<typeof requireLocalSession>>;
+
+  /** The session or its parent project is archived in the current record. */
+  function archivedNow({ session, group }: LocalSession): boolean {
+    const meta = deps.organization.read();
+    if (meta.sessionMeta[session.id]?.archived === true) return true;
+    return group !== undefined && projectView(group, meta).archived;
+  }
+
+  /** Running, waiting, queued, or a send still being admitted. */
+  function sessionBusy(sessionId: string): boolean {
+    return deps.activeTurns.has(sessionId) || (admitting.get(sessionId) ?? 0) > 0 ||
+      (deps.getBridge()?.queue.list(sessionId).length ?? 0) > 0;
+  }
   function modelRestriction({ session, view, projectArchived }: LocalSession) {
     if (view.readOnly || session.remoteWorkspace || session.scheduledRun ||
       (session.providerId && trustedExtensionAgentKeyFromProviderId(session.providerId))) return "READ_ONLY";
@@ -423,8 +450,10 @@ export function createLanWorkspace(deps: LanWorkspaceDeps) {
     if (field === "archived" && value === true) {
       const index = rootIndex([group]);
       const busy = (await hostSessions()).some(
-        (session) => projectOf(session, index) === group.id && deps.activeTurns.has(session.id),
+        (session) => projectOf(session, index) === group.id && sessionBusy(session.id),
       );
+      // Checked and written without an intervening await, so a send either
+      // sees this archive or is already counted as busy here.
       if (busy) throw new LanError(409, "BUSY");
     }
     if (field === "name") {
@@ -440,10 +469,7 @@ export function createLanWorkspace(deps: LanWorkspaceDeps) {
     const [field, value] = oneOrganizeField(body);
     const { view } = await requireLocalSession(sessionId);
     if (body.revision !== view.revision) throw new LanError(409, "CONFLICT");
-    if (field === "archived" && value === true) {
-      const queued = deps.getBridge()?.queue.list(sessionId).length ?? 0;
-      if (deps.activeTurns.has(sessionId) || queued > 0) throw new LanError(409, "BUSY");
-    }
+    if (field === "archived" && value === true && sessionBusy(sessionId)) throw new LanError(409, "BUSY");
     if (field === "name") {
       await deps.invoke(deps.channels.sessionRename, [sessionId, value]);
       deps.organization.patch({ kind: "session", key: sessionId, patch: { manualTitle: true } });
@@ -459,10 +485,14 @@ export function createLanWorkspace(deps: LanWorkspaceDeps) {
     const text = stringField(body, "text")?.trim() ?? "";
     if (!text) throw new LanError(400, "INVALID_ARGUMENT");
     if (Buffer.byteLength(text) > MAX_PROMPT) throw new LanError(413, "PAYLOAD_TOO_LARGE");
-    const { view } = await requireLocalSession(sessionId);
-    if (view.readOnly) throw new LanError(409, "READ_ONLY");
-    if (view.archived) throw new LanError(409, "ARCHIVED");
+    const local = await requireLocalSession(sessionId);
+    if (local.view.readOnly) throw new LanError(409, "READ_ONLY");
+    // Re-read the organization record in the same synchronous step that
+    // counts this send as admitting: a concurrent web archive then either
+    // wins (and is seen here) or finds this session busy.
+    if (archivedNow(local)) throw new LanError(409, "ARCHIVED");
     const principal: Principal = { subject: `lan:${deviceId}`, roles: ["viewer", "controller"], pairedDevice: false };
+    admitting.set(sessionId, (admitting.get(sessionId) ?? 0) + 1);
     try {
       const result = await bridge().agentHost.startTurn(principal, {
         sessionId,
@@ -475,11 +505,19 @@ export function createLanWorkspace(deps: LanWorkspaceDeps) {
       emitSoon(sessionId);
       return { id: result.turn.id };
     } catch (error) {
-      const code = (error as { code?: unknown })?.code;
+      const failure = error as { code?: unknown; errorCode?: unknown } | null;
+      const code = failure?.code ?? failure?.errorCode;
       if (code === "AGENT_BUSY") throw new LanError(409, "BUSY");
       if (code === "FORBIDDEN") throw new LanError(403, "FORBIDDEN");
       if (code === "AGENT_UNAVAILABLE") throw new LanError(503, "DESKTOP_UNAVAILABLE");
+      // The Host could not hold this turn to the phone's permission ceiling,
+      // so it did not run under the broader session setting either.
+      if (code === PERMISSION_CEILING_UNAVAILABLE) throw new LanError(503, "PERMISSION_CEILING_UNAVAILABLE");
       throw new LanError(500, "FAILED");
+    } finally {
+      const pending = (admitting.get(sessionId) ?? 1) - 1;
+      if (pending > 0) admitting.set(sessionId, pending);
+      else admitting.delete(sessionId);
     }
   }
 

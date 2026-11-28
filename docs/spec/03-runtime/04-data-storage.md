@@ -1,4 +1,4 @@
-# 04. Data Storage (Schema v34)
+# 04. Data Storage (Schema v35)
 
 ### Project path aliases (#2148)
 
@@ -887,11 +887,21 @@ CREATE TABLE turns (
   output_tokens INTEGER NOT NULL DEFAULT 0,
   usage_json    TEXT,                            -- full provider usage (cached breakdown, …)
   started_at    INTEGER NOT NULL,
-  ended_at      INTEGER
+  ended_at      INTEGER,
+  permission_ceiling TEXT CHECK (permission_ceiling IN ('ask', 'accept-edits', 'auto'))
 );
 CREATE INDEX idx_turns_session ON turns(session_id, started_at DESC);
 CREATE INDEX idx_turns_ended_at ON turns(ended_at DESC);
 ```
+
+`permission_ceiling` (schema v35) is the remote permission ceiling a turn was
+admitted under (remote-control security §4.3), written by `session.beginTurn`
+when its caller passes `permissionCeiling`. Every tool decision that names the
+turn, or that names none while the turn is the session's running turn, uses the
+stricter of the current session mode and this ceiling. The row keeps it after
+the turn ends so delegated work started by the turn stays bound. NULL means no
+ceiling. A ceiling that cannot be recorded ends the new turn with
+`PERMISSION_CEILING_UNAVAILABLE` and the turn never runs.
 
 ### 4.6a plan_approvals — immutable checkpoint and execution fields (schema v11)
 
@@ -994,7 +1004,9 @@ CREATE TABLE turn_queue (
   position         INTEGER NOT NULL,
   priority         INTEGER,
   voice_origin_json TEXT,
-  created_at       INTEGER NOT NULL
+  created_at       INTEGER NOT NULL,
+  start_goal       INTEGER NOT NULL DEFAULT 0 CHECK (start_goal IN (0, 1)),
+  permission_ceiling TEXT CHECK (permission_ceiling IN ('ask', 'accept-edits', 'auto'))
 );
 CREATE INDEX idx_turn_queue_session ON turn_queue(session_id, position);
 CREATE UNIQUE INDEX idx_turn_queue_idempotency
@@ -1829,6 +1841,12 @@ truncating at a guessed position.
   session `/fast` switch, defaulting to `0` for every existing session. Forks
   copy it; scheduled runs and delegated workers start at `0`. The migration
   keeps a v26 backup.
+- **Schema v35 is additive.** It adds nullable `turns.permission_ceiling` and
+  `turn_queue.permission_ceiling` (ADR turn-permission-ceiling). Existing turns
+  keep NULL. A queue entry persisted before v35 recorded its admitted mode but
+  not whether a ceiling bound it, so the migration uses that mode (`ask` for an
+  unrecognized value) as its ceiling: a restored remote entry cannot start
+  broader than it was admitted. The migration keeps a v34 backup.
 - **Schema v14 is additive.** It adds nullable `sessions.deleted_at`, the
   partial deletion index, and `session_import_origins`. Existing sessions stay
   active and have no origin rows. The migration runs in the same guarded

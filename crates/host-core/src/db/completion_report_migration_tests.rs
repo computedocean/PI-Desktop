@@ -54,6 +54,11 @@ fn populated_v30(path: &Path, preexisting_report: bool) {
     tx.commit().unwrap();
 }
 
+/// Queue columns that predate schema 35; that migration adds the ceiling.
+const LEGACY_QUEUE: &str = "SELECT id,session_id,principal,idempotency_key,input_hash,content,
+    attachments_json,session_message_id,user_message_id,permission_mode,position,priority,
+    voice_origin_json,created_at,start_goal FROM turn_queue";
+
 const LEGACY_RUN: &str = "SELECT id,session_id,mode_id,snapshot_hash,input,stage_id,state,wait_reason,last_error,
     revision,active_turn_id,active_origin,stage_entered,advanced_in_turn,pending_gate,retry_counts,
     rounds_completed,tokens_used,max_turns,max_tokens,artifact_paths,settled_turns,created_at,updated_at,
@@ -69,7 +74,7 @@ fn completion_report_migration_populated_30_preserves_all_data_and_pre_migration
     let gates = rows(&before, "SELECT * FROM mode_gate_results");
     let snapshots = rows(&before, "SELECT * FROM mode_snapshots");
     let sessions = rows(&before, "SELECT * FROM sessions");
-    let queue = rows(&before, "SELECT * FROM turn_queue");
+    let queue = rows(&before, LEGACY_QUEUE);
     let turns = rows(&before, "SELECT * FROM turns");
     drop(before);
     let db = Database::open(&path).unwrap();
@@ -79,7 +84,7 @@ fn completion_report_migration_populated_30_preserves_all_data_and_pre_migration
     assert_eq!(rows(db.conn(), "SELECT * FROM mode_gate_results"), gates);
     assert_eq!(rows(db.conn(), "SELECT * FROM mode_snapshots"), snapshots);
     assert_eq!(rows(db.conn(), "SELECT * FROM sessions"), sessions);
-    assert_eq!(rows(db.conn(), "SELECT * FROM turn_queue"), queue);
+    assert_eq!(rows(db.conn(), LEGACY_QUEUE), queue);
     assert_eq!(rows(db.conn(), "SELECT * FROM turns"), turns);
     assert_eq!(
         rows(db.conn(), "SELECT completion_report_json FROM mode_runs"),
@@ -91,7 +96,7 @@ fn completion_report_migration_populated_30_preserves_all_data_and_pre_migration
     assert!(!has_report(&backup));
     assert_eq!(rows(&backup, LEGACY_RUN), old_run);
     assert_eq!(rows(&backup, "SELECT * FROM mode_gate_results"), gates);
-    assert_eq!(rows(&backup, "SELECT * FROM turn_queue"), queue);
+    assert_eq!(rows(&backup, LEGACY_QUEUE), queue);
     // The old CHECK still rejects blocked; the upgraded one permits it only while waiting.
     assert!(backup
         .execute("UPDATE mode_runs SET wait_reason='blocked'", [])

@@ -16,6 +16,8 @@ import type {
   VoiceOrigin,
 } from "@pi-desktop/shared";
 
+import { isPermissionCeiling } from "./turn-permission-ceiling.js";
+
 /** Rust host-core over stdio JSON-RPC, as the ports below need it. */
 export type HostRpc = {
   call<T = unknown>(
@@ -213,6 +215,7 @@ export type HostQueueEntry = {
   voiceOrigin?: VoiceOrigin;
   attachments?: unknown;
   permissionMode: string;
+  permissionCeiling?: string;
   position: number;
   priority?: number;
   createdAt: string;
@@ -238,6 +241,9 @@ export function fromHostQueueEntry(entry: HostQueueEntry): QueuedTurnRecord {
       ? { attachments: entry.attachments as QueuedTurnRecord["attachments"] }
       : {}),
     effectivePermissionMode: permissionMode,
+    ...(entry.permissionCeiling !== undefined
+      ? { permissionCeiling: isPermissionCeiling(entry.permissionCeiling) ? entry.permissionCeiling : "ask" }
+      : {}),
     ...(entry.idempotencyKey ? { idempotencyKey: entry.idempotencyKey } : {}),
     inputHash: entry.inputHash,
     ...(entry.priority !== undefined ? { priority: entry.priority } : {}),
@@ -279,6 +285,7 @@ export function createHostQueueStore(
         ...(record.voiceOrigin ? { voiceOrigin: record.voiceOrigin } : {}),
         ...(record.attachments ? { attachments: record.attachments } : {}),
         permissionMode: record.effectivePermissionMode,
+        ...(record.permissionCeiling ? { permissionCeiling: record.permissionCeiling } : {}),
       });
     },
     async remove(id) {

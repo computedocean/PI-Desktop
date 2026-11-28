@@ -404,6 +404,18 @@
     input.select();
   }
 
+  /** Restore an archived parent project from one of its conversations. */
+  async function restoreProject(projectId) {
+    if (!state.online) return notify(errorText("NETWORK"));
+    try {
+      const project = (await loadAll("/v1/projects?q=&archived=1")).find((item) => item.id === projectId);
+      if (project) await organize("projects", project, { archived: false });
+      else await render({ refresh: true });
+    } catch (error) {
+      fail(error);
+    }
+  }
+
   function organizeActions(kind, item) {
     const label = kind === "projects" ? item.label : item.title || t("untitled");
     return [
@@ -821,6 +833,11 @@
     const notices = [];
     if (conversation.waiting === "approval") notices.push(notice({ dot: "waiting", text: t("waitingApproval") }));
     if (conversation.waiting === "input") notices.push(notice({ dot: "waiting", text: t("waitingInput") }));
+    // Name the record that must be restored; a parent archive is not the
+    // session's own flag, and restoring the project leaves that flag alone.
+    if (session.projectArchived) {
+      notices.push(notice({ icon: "archive", text: t("archivedProject"), action: { label: t("restoreProject"), run: () => void restoreProject(session.projectId) } }));
+    }
     if (session.archived) {
       notices.push(notice({ icon: "archive", text: t("archivedSession"), action: { label: t("restore"), run: () => void organize("sessions", session, { archived: false }) } }));
     }
@@ -838,7 +855,7 @@
         ])))
       : null;
 
-    const canChat = !session.readOnly && !session.archived;
+    const canChat = !session.readOnly && !session.archived && !session.projectArchived;
     if (!conversation.canSelectModel || !canChat) modelPicker.dismiss();
     if (!canChat) state.syncComposer = null;
     const composer = canChat ? buildComposer(sessionId, conversation) : null;

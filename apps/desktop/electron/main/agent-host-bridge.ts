@@ -111,18 +111,9 @@ export function createAgentHostBridge(options: AgentHostBridgeOptions) {
     async prompt(request: TurnStartRequest) {
       try {
         const summary = await sessions.get(request.sessionId);
-        // A per-turn ceiling that would WIDEN the session's stored mode is a
-        // real escalation attempt — e.g. a remote viewer whose principal is
-        // subject to `remoteMaxPermissionMode: "ask"` should never be able to
-        // run a turn at `auto`. Refuse before the sidecar sees the request.
-        //
-        // A NARROWER ceiling (or the same mode) is safe to accept: it can only
-        // reduce what the turn is allowed to do. The runtime still uses the
-        // session's stored mode when it enforces tool decisions, so a narrower
-        // request is not yet honoured turn-locally — that is the R1 leftover
-        // waiting on host-core to accept a `permissionMode` override on
-        // `session.beginTurn`. We plumb the parameter end-to-end anyway so the
-        // enforcement gate can flip on without another wire change.
+        // A per-turn mode that would WIDEN the session's stored mode is a
+        // real escalation attempt — e.g. a queued remote turn whose session
+        // was lowered after admission. Refuse before the sidecar sees it.
         if (
           summary &&
           summary.permissionMode !== request.effectivePermissionMode &&
@@ -139,10 +130,9 @@ export function createAgentHostBridge(options: AgentHostBridgeOptions) {
             },
           );
         }
-        const permissionModeOverride =
-          summary && summary.permissionMode !== request.effectivePermissionMode
-            ? request.effectivePermissionMode
-            : undefined;
+        // A principal bound by the remote ceiling (a paired LAN browser) has
+        // it recorded on the durable turn; host-core then applies it to every
+        // tool decision of that turn, including its delegates.
         const promptRequest = {
           sessionId: request.sessionId,
           content: request.content,
@@ -151,7 +141,7 @@ export function createAgentHostBridge(options: AgentHostBridgeOptions) {
           ...(request.userMessageId ? { messageId: request.userMessageId } : {}),
           ...(request.voiceOrigin ? { voiceOrigin: request.voiceOrigin } : {}),
           ...(request.attachments ? { attachments: request.attachments } : {}),
-          ...(permissionModeOverride ? { permissionMode: permissionModeOverride } : {}),
+          ...(request.permissionCeiling ? { permissionMode: request.permissionCeiling } : {}),
         };
         // The in-process invoke keeps object identity, so the mode run origin
         // reaches the prompt handler without any serializable field.

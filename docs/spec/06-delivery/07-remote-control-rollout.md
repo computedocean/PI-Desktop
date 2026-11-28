@@ -465,6 +465,13 @@ Recorded on the `feat/remote-agent-host` branch, 2026-09-10:
   sidecar as a documented stub. Turn-scoped enforcement in host-core
   (`session.beginTurn` accepting an override) is the remaining piece, so a
   narrower ceiling on a local turn does not yet clamp tool decisions.
+- R1 ceiling enforcement (2026-11-28, ADR turn-permission-ceiling): a turn
+  admitted for a principal bound by the remote ceiling carries
+  `permissionCeiling` to `session.beginTurn`, which records it on the durable
+  turn (schema v35); queued turns carry it in `turn_queue`. host-core applies
+  the stricter of the current session mode and that ceiling to every tool
+  decision of the turn, including its delegates. The sidecar stub is removed,
+  and a Host that does not confirm the ceiling starts no turn.
 - R2 started (2026-09-18, D447 / ADR 0284): `packages/host-runtime` holds the
   Electron-independent runtime layer — the host-core and sidecar stdio
   transports, the restart supervisor, `RuntimeService` (the module's

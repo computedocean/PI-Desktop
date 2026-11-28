@@ -788,7 +788,10 @@ fixtures; do not use a user's running instance.
 - **Steps:** Search for B and tap its row. Open a session's action menu, close it,
   then tap that session to read its history. Pin and rename B and rename, pin,
   archive and restore an idle session. Archive and restore B through the
-  Archived view. Make a competing Desktop rename and submit the stale edit.
+  Archived view. With B archived, send and queue from a B conversation in a
+  second tab that loaded before the archive; restore B and send again. Archive
+  B while a send to one of its sessions is still being admitted, and while
+  work is queued. Make a competing Desktop rename and submit the stale edit.
 - **Expected:** One row per group, stable IDs, correct filtered/recent/pinned
   lists; both clients show committed changes without reloading. Archive is not
   deletion and does not cascade; restoring B preserves the separately archived
@@ -796,7 +799,12 @@ fixtures; do not use a user's running instance.
   A closed action menu does not cover the page or intercept taps; test row and
   menu actions with browser hit testing, not direct calls to the controls.
   Desktop stays in A with draft, focus and scroll intact. Repeating the archive
-  against a busy target fails without stopping work.
+  against a busy target fails without stopping work. While B is archived its
+  history stays readable, the conversation names B as the record to restore
+  and shows no composer after refresh, and the stale send or queue starts no
+  turn and keeps its text. After restoring B a send in an unarchived session
+  runs, while the separately archived session stays read-only. An archive that
+  races an admitted send reports busy; one decided first refuses the send.
 - **Acceptance:** C, D; W02, W03, W05.
 
 ### E2E-271: Create and continue the same session on phone and desktop
@@ -842,11 +850,18 @@ fixtures; do not use a user's running instance.
 - **Steps:** Submit an ordinary answer, race a second answer from Desktop, then
   trigger a gated action. Reload the phone while pending; try a browser approval
   and permission change, then deny locally. Repeat with local approval and with
-  expiry/cancellation. Inspect the special session on the phone.
+  expiry/cancellation. Repeat the gated action with the session stored as
+  `auto` (and as `inherit` with an `auto` default) from a phone send, a queued
+  phone send and a subagent the phone turn delegated, then send the next turn
+  from Desktop. Inspect the special session on the phone.
 - **Expected:** One ordinary answer is accepted. The phone reports the pending
   request and actual outcome; only Desktop can approve, including on a session
   configured for a higher local permission mode. Deny/expiry never executes the
   gated action, local allow executes the fixture once, and reload grants nothing.
+  Under the stored `auto` mode every phone-originated path still waits for
+  Desktop approval, the saved mode is unchanged, and the next Desktop turn runs
+  under `auto` without a prompt. A Host that cannot record the ceiling refuses
+  the phone send with a visible reason and keeps the draft.
   Unsupported sessions do not gain writable controls or change mode.
 - **Acceptance:** C, E; W04, W06.
 

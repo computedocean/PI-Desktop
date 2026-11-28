@@ -92,7 +92,7 @@ already-established cookie for older browser tabs; there is no pending state.
 | Project sessions | Enter a project to see its sessions; search by title, open history, rename, pin/unpin, archive/restore. Show running, waiting, interrupted or failed status from the Host. Stable IDs, not names or list positions, distinguish equally named records. Use bounded pages; search is not limited to the first loaded page. |
 | New in project | A project's **New session** targets that explicit project, even if the desktop or a second tab is viewing another. Use desktop defaults and the normal local Agent. Only reuse an existing empty conversation if it meets Desktop's pristine, same-scope reuse rule; never attach to a running session or another pending submission. Double-tapping one intent cannot create two sessions. |
 | Temporary | Any paired device can list, organize and continue ordinary temporary conversations and create one through the Temporary conversations entry. A temporary conversation has no project and uses normal temporary workspace isolation. It never inherits the last Desktop project. |
-| Archive | Archiving is reversible organization, not deletion, cancellation, folder movement or transcript modification. Inspect archived items via an explicit filter without restoring them. Restore an archived parent project before creating or sending; restore an archived session before sending. Restoring a project preserves each session's own archive/pin state. Decline a web archive if the target session, or a project descendant, is running, queued or waiting for input. Never stop work to make archive succeed. |
+| Archive | Archiving is reversible organization, not deletion, cancellation, folder movement or transcript modification. Inspect archived items via an explicit filter without restoring them. Restore an archived parent project before creating or sending; restore an archived session before sending. A conversation whose project is archived stays readable, names the project as the record to restore, and offers no Send or Queue; the parent's archive is reported separately from the session's own flag. Send and queue check the current archive state at admission, so a stale tab starts no turn. Restoring a project preserves each session's own archive/pin state. Decline a web archive if the target session, or a project descendant, is running, queued, waiting for input or still being admitted from the WebUI; whichever of archive and send is decided first wins. Never stop work to make archive succeed; cancel and stop stay available for already admitted work. |
 
 Only existing locally owned, local-workspace projects and ordinary local Agent
 sessions are writable in P0. Local-Agent projects backed by an SSH workspace,
@@ -234,7 +234,10 @@ running work follows the Host incident policy; never silently replay or undo
 it. Clear protected views on authorization loss; already seen text cannot be
 remotely erased. A web turn never gets the SSH-paired-owner exemption: apply
 the lower of session policy and the WebUI `ask` ceiling without changing the
-desktop session setting. A browser cannot approve its own escalation.
+desktop session setting. Host-core enforces that ceiling on every tool decision
+of the turn, including after queueing and for its delegated work; a turn whose
+ceiling cannot be recorded is refused with `PERMISSION_CEILING_UNAVAILABLE` and
+keeps the draft. A browser cannot approve its own escalation.
 
 Session archive is **owner-only** in RACP. The LAN WebUI does not reuse RACP
 `session/archive` and never grants a phone the owner role. The WebUI checks
@@ -350,16 +353,18 @@ settings) and `apps/desktop/src/features/lan-webui/lan-catalog-sync.ts`
 | Area | Delivered | Not yet |
 |---|---|---|
 | W01 | Off by default; remembers opt-in, binding and unexpired pairings across launches; one-time-code pairing with copy and QR; explicit disable revokes access | HTTPS (deliberately deferred) |
-| W02/W03 | Local projects and temporary conversations; search; archived filter; rename, pin, archive/restore with revision conflicts; new session in the explicit project | Reuse of an existing empty session |
+| W02/W03 | Local projects and temporary conversations; search; archived filter; rename, pin, archive/restore with revision conflicts; new session in the explicit project; conversations of an archived project read-only until the project is restored | Reuse of an existing empty session |
 | W04 | Paged history; live assistant text; send; queue; cancel queued; stop the named turn; “waiting on Desktop” for approvals and input | Answering ordinary questions from the browser; model label is the raw model id |
 | W05 | Idempotency keys for every mutation; SSE change notices with refetch; reconnect banner | Cursor-based replay (refetch is used instead) |
-| W06 | Device revocation; non-owner principal under the remote `ask` ceiling; plan/goal and remote sessions read-only or hidden | Idle (30 min) session expiry; canceling already queued work on device revocation |
+| W06 | Device revocation; non-owner principal under the remote `ask` ceiling, enforced per turn by host-core (including queued and delegated work); plan/goal and remote sessions read-only or hidden | Idle (30 min) session expiry; canceling already queued work on device revocation |
 | W07 | Phone-first layout, 44 px targets, English and Simplified Chinese, IME-safe Enter | Screen-reader and large-catalog qualification |
 | W08 | Existing names, pins and archives keep working; browser edits survive stale sidebar writes | — |
 
 Automated coverage: `apps/desktop/test/lan-webui-organization.test.mjs`,
 `lan-webui-restart.test.mjs` (saved startup and pairing lifecycle),
-`lan-webui-user-path.test.mjs` (real HTTP listener, fake Desktop), and
+`lan-webui-user-path.test.mjs` (real HTTP listener, fake Desktop),
+`lan-webui-archive-admission.test.mjs` (archived-parent read-only, archive/send
+ordering, refused ceiling), and
 `lan-webui-settings-user-path.test.mjs` (isolated Desktop System settings).
 The phone-size Electron Chromium journey runs separately with
 `pnpm test:e2e:lan-webui` on the Electron-equipped CI runner.

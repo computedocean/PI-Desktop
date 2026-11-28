@@ -1940,6 +1940,8 @@ export class DesktopAgentRuntime {
    * authorization metadata local to the executor, never keyed by such ids. */
   private readonly delegateExecution = new AsyncLocalStorage<{
     owner: string; permission: SubagentPermission; worktreeKey?: string; writeScope?: readonly string[];
+    /** The turn that started the delegate; its Host permission ceiling governs the delegate's calls. */
+    turnId?: string;
   }>();
   /** Serializes same-path mutations across the parent and its delegates. */
   private writeLocks = new PathMutex();
@@ -3821,7 +3823,7 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
               denied?: boolean;
             }>("tools.execute", {
               sessionId: this.sessionId,
-              turnId: this.turnId,
+              turnId: delegate?.turnId ?? this.turnId,
               toolCallId,
               toolName,
               args: params,
@@ -5600,10 +5602,12 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
     const worktreeKey = typeof worktreeKeyOrApply === "string" ? worktreeKeyOrApply : undefined;
     const apply = typeof worktreeKeyOrApply === "function" ? worktreeKeyOrApply : applyInstructions;
     const scope = definition.permission ?? DEFAULT_SUBAGENT_PERMISSION;
+    // A delegate outlives the turn that started it; keep that turn's identity.
+    const turnId = this.delegateExecution.getStore()?.turnId ?? this.turnId;
     return tools.map((tool) => ({
       ...tool,
       execute: (toolCallId, args, signal, onUpdate) => this.delegateExecution.run(
-        { owner: mutationOwner, permission: scope, worktreeKey, writeScope },
+        { owner: mutationOwner, permission: scope, worktreeKey, writeScope, turnId },
         () => this.instructionExecution.run(apply ?? (() => undefined), () => tool.execute(toolCallId, args, signal, onUpdate)),
       ),
     }));
